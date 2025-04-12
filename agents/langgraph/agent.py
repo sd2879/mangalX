@@ -14,7 +14,6 @@ from worldnewsapi import ApiException
 
 load_dotenv()
 
-# Validate environment variables
 required_env_vars = [
     "GOOGLE_API_KEY",
     "TWITTER_API_KEY",
@@ -63,7 +62,7 @@ def TopicGenerator(
     Args:
         text: Required search query string (keywords, phrases)
         text_match_indexes: Where to search for the text (default: 'title,content')
-        source_country: Country of news articles (default: 'us')
+        source_country: Country of news articles (default: 'UK')
         language: Language of news articles (default: 'en')
         sort: Sorting criteria (default: 'publish-time')
         sort_direction: Sort direction (default: 'ASC')
