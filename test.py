@@ -79,6 +79,6 @@ def get_serpapi_text(query, api_key, top_n=5):
 # Example usage
 if __name__ == "__main__":
     query = "lONDON WEATHER"
-    api_key = "977d1ae964cb7b4204cb0cd63cdf2f4bf4b52d26bd5bfe876bd039ebf98b7c1"  # Replace with your SerpAPI key
+    api_key = ""  # Replace with your SerpAPI key
     result = get_serpapi_text(query, api_key)
     print(json.dumps(result, indent=2))
