@@ -24,7 +24,7 @@ from common.types import (
     InvalidParamsError,
 )
 from common.server.task_manager import InMemoryTaskManager
-from agents.langgraph.agent import NewsTweetAgent  # Updated from CurrencyAgent
+from agents.langgraph.agent import NewsTweetAgent
 from common.utils.push_notification_auth import PushNotificationSenderAuth
 import common.server.utils as utils
 import asyncio

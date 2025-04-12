@@ -2,8 +2,7 @@ from common.server import A2AServer
 from common.types import AgentCard, AgentCapabilities, AgentSkill, MissingAPIKeyError
 from common.utils.push_notification_auth import PushNotificationSenderAuth
 from agents.langgraph.task_manager import AgentTaskManager
-# from agents.langgraph.agent import CurrencyAgent
-from agents.langgraph.agent import NewsTweetAgent  # Note: Should be renamed to NewsTweetAgent
+from agents.langgraph.agent import NewsTweetAgent
 import click
 import os
 import logging
