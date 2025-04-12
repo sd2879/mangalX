@@ -3,16 +3,32 @@ from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import AIMessage, ToolMessage, HumanMessage
-import httpx, traceback
+from langchain_core.prompts import ChatPromptTemplate
 from typing import Any, Dict, AsyncIterable, Literal
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os, json, tweepy, worldnewsapi
 import system_prompts
+from tweepy import TweepyException
+from worldnewsapi import ApiException
+
 load_dotenv()
 
+# Validate environment variables
+required_env_vars = [
+    "GOOGLE_API_KEY",
+    "TWITTER_API_KEY",
+    "TWITTER_API_KEY_SECRET",
+    "TWITTER_ACCESS_TOKEN",
+    "TWITTER_ACCESS_TOKEN_SECRET",
+    "WORLD_NEWS_API",
+]
+for var in required_env_vars:
+    if not os.getenv(var):
+        raise ValueError(f"Missing environment variable: {var}")
+
 gemini_chat = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash",
+    model="gemini-1.5-flash",  # Updated to a valid model (verify with Google API)
     google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
@@ -24,76 +40,22 @@ twitter_object = tweepy.Client(
 )
 
 news_configuration = worldnewsapi.Configuration(
-        host="https://api.worldnewsapi.com"
-    )
-news_configuration.api_key['apiKey'] = os.getenv('WORLD_NEWS_API')
+    host="https://api.worldnewsapi.com"
+)
+news_configuration.api_key["apiKey"] = os.getenv("WORLD_NEWS_API")
 
 memory = MemorySaver()
 
-# @tool
-# def get_exchange_rate(
-#     currency_from: str = "USD",
-#     currency_to: str = "EUR",
-#     currency_date: str = "latest",
-# ):
-#     """Use this to get current exchange rate.
-
-#     Args:
-#         currency_from: The currency to convert from (e.g., "USD").
-#         currency_to: The currency to convert to (e.g., "EUR").
-#         currency_date: The date for the exchange rate or "latest". Defaults to "latest".
-
-#     Returns:
-#         A dictionary containing the exchange rate data, or an error message if the request fails.
-#     """    
-#     try:
-#         response = httpx.get(
-#             f"https://api.frankfurter.app/{currency_date}",
-#             params={"from": currency_from, "to": currency_to},
-#         )
-#         response.raise_for_status()
-
-#         data = response.json()
-#         if "rates" not in data:
-#             return {"error": "Invalid API response format."}
-#         return data
-#     except httpx.HTTPError as e:
-#         return {"error": f"API request failed: {e}"}
-#     except ValueError:
-#         return {"error": "Invalid JSON response from API."}
-
-# @tool
-# def calculate_math(
-#     expression: str
-# ):
-#     """Use this to perform mathematical calculations.
-
-#     Args:
-#         expression: A string containing a mathematical expression (e.g., "2 + 3", "5 * 4").
-
-#     Returns:
-#         The result of the calculation as a string, or an error message if the expression is invalid.
-#     """
-#     try:
-#         # Basic safety check to prevent dangerous inputs
-#         allowed_chars = set("0123456789 +-*/(). ")
-#         if not all(c in allowed_chars for c in expression):
-#             return {"error": "Invalid characters in expression. Use numbers, +, -, *, /, (), and spaces only."}
-#         result = eval(expression, {"__builtins__": {}})
-#         return {"result": str(result)}
-#     except Exception as e:
-#         return {"error": f"Calculation failed: {str(e)}"}
-    
 @tool
 def TopicGenerator(
     text: str,
-    text_match_indexes: str = 'title,content',
-    source_country: str = 'us',
-    language: str = 'en',
-    sort: str = 'publish-time',
-    sort_direction: str = 'ASC',
+    text_match_indexes: str = "title,content",
+    source_country: str = "us",
+    language: str = "en",
+    sort: str = "publish-time",
+    sort_direction: str = "ASC",
     offset: int = 0,
-    number: int = 1
+    number: int = 1,
 ):
     """
     Search articles from WorldNewsAPI.
@@ -103,22 +65,13 @@ def TopicGenerator(
         text_match_indexes: Where to search for the text (default: 'title,content')
         source_country: Country of news articles (default: 'us')
         language: Language of news articles (default: 'en')
-        min_sentiment: Minimum sentiment of the news (default: -0.8)
-        max_sentiment: Maximum sentiment of the news (default: 0.8)
-        earliest_publish_date: News must be published after this date
-        latest_publish_date: News must be published before this date
-        news_sources: Comma-separated list of news sources
-        authors: Comma-separated list of author names
-        categories: Comma-separated list of categories
-        entities: Filter news by entities
-        location_filter: Filter news by radius around a certain location
         sort: Sorting criteria (default: 'publish-time')
         sort_direction: Sort direction (default: 'ASC')
         offset: Number of news to skip (default: 0)
-        number: Number of news to return (default: 10)
+        number: Number of news to return (default: 1)
 
     Returns:
-        str: Markdown formatted string containing articles and metadata
+        dict: Contains 'result' key with Markdown formatted string of articles or an error message
     """
     try:
         with worldnewsapi.ApiClient(news_configuration) as api_client:
@@ -131,9 +84,8 @@ def TopicGenerator(
                 sort=sort,
                 sort_direction=sort_direction,
                 offset=offset,
-                number=number
+                number=number,
             )
-            articles = api_response.news
             articles = api_response.news
             news = "\n".join(
                 f"""
@@ -146,129 +98,180 @@ def TopicGenerator(
             **Text:** {getattr(article, 'text', 'No description')}
 
             ------------------
-            """ for article in articles
+            """
+                for article in articles
             )
             return {"result": str(news)}
+    except ApiException as e:
+        return {"result": f"News API error: {str(e)}"}
     except Exception as e:
-        print(f"Failed to generate news with error: {traceback.format_exc()}")
-        return {"result": f"Failed to generate news with error: {str(e)}"}
+        return {"result": f"Unexpected error: {str(e)}"}
 
 @tool
-def TweetCrafter(
-    tweet_content: str
-):
-    """This tool generates a tweet based on the provided context
-    
+def TweetCrafter(tweet_content: str):
+    """
+    Generates a tweet based on the provided context.
+
     Args:
-        tweet_content: A string containing a news thread.
+        tweet_content: A string containing a news thread or context.
 
     Returns:
-        The context of tweet to be posted on x.com   
+        dict: Contains 'result' key with the tweet or 'error' key with an error message.
     """
     try:
-        prompt = [
-            HumanMessage(content=system_prompts.tweet_generation_prompt.format(context=tweet_content))
-        ]
-        response = gemini_chat(prompt)
+        if len(tweet_content) == 0:
+            return {"error": "Tweet content cannot be empty"}
+        prompt = HumanMessage(content=system_prompts.tweet_generation_prompt.format(context=tweet_content))
+        response = gemini_chat([prompt])
         tweet_data = json.loads(response.content)
-        print(f"Tone selected: {tweet_data.get('tone')}")
-        print(f"Format selected: {tweet_data.get('format')}")
-        tweet = tweet_data['tweet']
+        if not isinstance(tweet_data, dict) or "tweet" not in tweet_data:
+            return {"error": "Invalid tweet data format"}
+        tweet = tweet_data["tweet"]
+        if len(tweet) > 280:
+            return {"error": "Generated tweet exceeds 280 characters"}
+        print(f"Tone selected: {tweet_data.get('tone', 'unknown')}")
+        print(f"Format selected: {tweet_data.get('format', 'unknown')}")
         return {"result": str(tweet)}
+    except AttributeError:
+        return {"error": "Tweet generation prompt is not configured"}
+    except json.JSONDecodeError:
+        return {"error": "Failed to parse tweet response"}
     except Exception as e:
-        print(f"Failed to generate tweet with error: {traceback.format_exc()}")
-        return {"error": f"Unable to generate tweet with error: {str(e)}"}
+        return {"error": f"Unable to generate tweet: {str(e)}"}
 
 @tool
-def TweetSender(
-    tweet_content: str
-):
-    """This tool posts a tweet on x.compile
-    
+def TweetSender(tweet_content: str):
+    """
+    Posts a tweet on X.com.
+
     Args:
-        tweet_content: A string which contains context of the tweet
-        """
+        tweet_content: A string containing the tweet text.
+
+    Returns:
+        dict: Contains 'result' key indicating 'successful' or an error message.
+    """
     try:
+        if len(tweet_content) > 280:
+            return {"result": "Tweet exceeds 280 characters"}
+        if len(tweet_content) == 0:
+            return {"result": "Tweet content cannot be empty"}
         twitter_object.create_tweet(text=tweet_content)
         return {"result": "successful"}
+    except TweepyException as e:
+        return {"result": f"Failed to post tweet: {str(e)}"}
     except Exception as e:
-        return {"result": f"unsuccessful with error: {str(e)}"}
+        return {"result": f"Unexpected error: {str(e)}"}
 
 class ResponseFormat(BaseModel):
     """Respond to the user in this format."""
     status: Literal["input_required", "completed", "error"] = "input_required"
     message: str
 
-class CurrencyAgent:
-
+class NewsTweetAgent:
     SYSTEM_INSTRUCTION = (
-        "You are a specialized assistant for currency conversions and mathematical calculations. "
+        "You are a specialized assistant for generating and posting tweets based on news topics. "
         "Your purpose is to: "
-        "1. Use the 'get_exchange_rate' tool to answer questions about currency exchange rates. "
-        "2. Use the 'calculate_math' tool to perform mathematical calculations when asked to compute expressions like '2 + 3' or '5 * 4'. "
-        "If the user asks about anything other than currency conversion, exchange rates, or mathematical calculations, "
-        "politely state that you cannot help with that topic and can only assist with currency-related queries or math. "
+        "1. Use the 'TopicGenerator' tool to search for news articles based on user-provided topics or keywords. "
+        "2. Use the 'TweetCrafter' tool to create tweets based on provided news content or context. "
+        "3. Use the 'TweetSender' tool to post tweets to X.com when explicitly requested. "
+        "If the user asks about anything other than news searching, tweet generation, or tweet posting, "
+        "politely state that you cannot help with that topic and can only assist with news-related queries or tweeting tasks. "
         "Do not attempt to answer unrelated questions or use tools for other purposes. "
         "Examples: "
-        "- Query: 'How much is 1 USD to EUR?' -> Use get_exchange_rate. "
-        "- Query: 'Calculate 2 + 3' -> Use calculate_math to return '5'. "
-        "- Query: 'What's the weather?' -> Respond: 'I can only assist with currency conversions and mathematical calculations.' "
-        "Set response status to input_required if the user needs to provide more information (e.g., missing currency or incomplete math expression). "
+        "- Query: 'Find news about AI advancements' -> Use TopicGenerator to return relevant articles. "
+        "- Query: 'Create a tweet about a recent tech event' -> Use TweetCrafter to generate a tweet. "
+        "- Query: 'Post this tweet: AI is cool' -> Use TweetSender to post the tweet. "
+        "- Query: 'What's the weather?' -> Respond: 'I can only assist with news searching, tweet generation, or posting tweets.' "
+        "Set response status to input_required if the user needs to provide more information (e.g., missing topic or tweet content). "
         "Set response status to error if there is an error while processing the request. "
         "Set response status to completed if the request is complete."
     )
-     
-    def __init__(self):
-        self.model = ChatGoogleGenerativeAI(model="gemini-2.0-flash")
-        self.tools = [TweetCrafter, TweetSender]
 
+    def __init__(self):
+        self.model = ChatGoogleGenerativeAI(model="gemini-1.5-flash")  # Verify model name
+        self.tools = [TopicGenerator, TweetCrafter, TweetSender]
+        system_prompt = ChatPromptTemplate.from_messages([
+            ("system", self.SYSTEM_INSTRUCTION),
+            ("human", "{input}")
+        ])
+        self.model = self.model.bind(prompt=system_prompt)
         self.graph = create_react_agent(
-            self.model, tools=self.tools, checkpointer=memory, prompt=self.SYSTEM_INSTRUCTION, response_format=ResponseFormat
+            self.model, tools=self.tools, checkpointer=memory, response_format=ResponseFormat
         )
 
-    def invoke(self, query, sessionId) -> str:
+    def invoke(self, query, sessionId) -> Dict[str, Any]:
+        if not isinstance(query, str):
+            return {
+                "is_task_complete": False,
+                "require_user_input": True,
+                "content": "Query must be a string"
+            }
         config = {"configurable": {"thread_id": sessionId}}
-        self.graph.invoke({"messages": [("user", query)]}, config)        
-        return self.get_agent_response(config)
+        try:
+            self.graph.invoke({"messages": [("user", query)]}, config)
+            return self.get_agent_response(config)
+        except Exception as e:
+            return {
+                "is_task_complete": False,
+                "require_user_input": True,
+                "content": f"Error processing query: {str(e)}"
+            }
 
     async def stream(self, query, sessionId) -> AsyncIterable[Dict[str, Any]]:
+        if not isinstance(query, str):
+            yield {
+                "is_task_complete": False,
+                "require_user_input": True,
+                "content": "Query must be a string"
+            }
+            return
         inputs = {"messages": [("user", query)]}
         config = {"configurable": {"thread_id": sessionId}}
-
-        for item in self.graph.stream(inputs, config, stream_mode="values"):
-            message = item["messages"][-1]
-            if (
-                isinstance(message, AIMessage)
-                and message.tool_calls
-                and len(message.tool_calls) > 0
-            ):
-                tool_name = message.tool_calls[0]["name"]
-                if tool_name == "get_exchange_rate":
+        try:
+            for item in self.graph.stream(inputs, config, stream_mode="values"):
+                message = item["messages"][-1]
+                if (
+                    isinstance(message, AIMessage)
+                    and message.tool_calls
+                    and len(message.tool_calls) > 0
+                ):
+                    tool_name = message.tool_calls[0]["name"]
+                    if tool_name == "TopicGenerator":
+                        yield {
+                            "is_task_complete": False,
+                            "require_user_input": False,
+                            "content": "Searching for news articles..."
+                        }
+                    elif tool_name == "TweetCrafter":
+                        yield {
+                            "is_task_complete": False,
+                            "require_user_input": False,
+                            "content": "Crafting a tweet..."
+                        }
+                    elif tool_name == "TweetSender":
+                        yield {
+                            "is_task_complete": False,
+                            "require_user_input": False,
+                            "content": "Posting the tweet..."
+                        }
+                elif isinstance(message, ToolMessage):
                     yield {
                         "is_task_complete": False,
                         "require_user_input": False,
-                        "content": "Looking up the exchange rates...",
+                        "content": "Processing the results..."
                     }
-                elif tool_name == "calculate_math":
-                    yield {
-                        "is_task_complete": False,
-                        "require_user_input": False,
-                        "content": "Performing the calculation...",
-                    }
-            elif isinstance(message, ToolMessage):
-                yield {
-                    "is_task_complete": False,
-                    "require_user_input": False,
-                    "content": "Processing the results...",
-                }            
-        
-        yield self.get_agent_response(config)
+            yield self.get_agent_response(config)
+        except Exception as e:
+            yield {
+                "is_task_complete": False,
+                "require_user_input": True,
+                "content": f"Streaming error: {str(e)}"
+            }
 
-        
     def get_agent_response(self, config):
-        current_state = self.graph.get_state(config)        
-        structured_response = current_state.values.get('structured_response')
-        if structured_response and isinstance(structured_response, ResponseFormat): 
+        current_state = self.graph.get_state(config)
+        structured_response = current_state.values.get("structured_response")
+        if structured_response and isinstance(structured_response, ResponseFormat):
             if structured_response.status == "input_required":
                 return {
                     "is_task_complete": False,
@@ -287,11 +290,10 @@ class CurrencyAgent:
                     "require_user_input": False,
                     "content": structured_response.message
                 }
-
         return {
             "is_task_complete": False,
             "require_user_input": True,
-            "content": "We are unable to process your request at the moment. Please try again.",
+            "content": "Unable to process your request at the moment. Please try again."
         }
 
     SUPPORTED_CONTENT_TYPES = ["text", "text/plain"]

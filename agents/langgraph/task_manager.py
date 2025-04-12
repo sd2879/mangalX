@@ -1,4 +1,4 @@
-from typing import AsyncIterable
+from typing import AsyncIterable, Union
 from common.types import (
     SendTaskRequest,
     TaskSendParams,
@@ -24,20 +24,19 @@ from common.types import (
     InvalidParamsError,
 )
 from common.server.task_manager import InMemoryTaskManager
-from agents.langgraph.agent import CurrencyAgent
+from agents.langgraph.agent import NewsTweetAgent  # Updated from CurrencyAgent
 from common.utils.push_notification_auth import PushNotificationSenderAuth
 import common.server.utils as utils
-from typing import Union
 import asyncio
 import logging
-import traceback
 
 logger = logging.getLogger(__name__)
 
-
 class AgentTaskManager(InMemoryTaskManager):
-    def __init__(self, agent: CurrencyAgent, notification_sender_auth: PushNotificationSenderAuth):
+    def __init__(self, agent: NewsTweetAgent, notification_sender_auth: PushNotificationSenderAuth):
         super().__init__()
+        if not hasattr(agent, "invoke") or not hasattr(agent, "stream"):
+            raise ValueError("Agent must support invoke and stream methods")
         self.agent = agent
         self.notification_sender_auth = notification_sender_auth
 
@@ -47,6 +46,10 @@ class AgentTaskManager(InMemoryTaskManager):
 
         try:
             async for item in self.agent.stream(query, task_send_params.sessionId):
+                required_keys = {"is_task_complete", "require_user_input", "content"}
+                if not all(key in item for key in required_keys):
+                    raise ValueError(f"Invalid agent stream output: missing keys {required_keys}")
+
                 is_task_complete = item["is_task_complete"]
                 require_user_input = item["require_user_input"]
                 artifact = None
@@ -80,8 +83,7 @@ class AgentTaskManager(InMemoryTaskManager):
                     )
                     await self.enqueue_events_for_sse(
                         task_send_params.id, task_artifact_update_event
-                    )                    
-                    
+                    )
 
                 task_update_event = TaskStatusUpdateEvent(
                     id=task_send_params.id, status=task_status, final=end_stream
@@ -90,42 +92,57 @@ class AgentTaskManager(InMemoryTaskManager):
                     task_send_params.id, task_update_event
                 )
 
-        except Exception as e:
-            logger.error(f"An error occurred while streaming the response: {e}")
+        except ValueError as e:
+            logger.error(f"Agent stream error: {e}")
             await self.enqueue_events_for_sse(
                 task_send_params.id,
-                InternalError(message=f"An error occurred while streaming the response: {e}")                
+                InternalError(message=f"Agent stream error: {str(e)}")
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error while streaming: {e}")
+            await self.enqueue_events_for_sse(
+                task_send_params.id,
+                InternalError(message=f"Unexpected error: {str(e)}")
             )
 
     def _validate_request(
         self, request: Union[SendTaskRequest, SendTaskStreamingRequest]
     ) -> JSONRPCResponse | None:
         task_send_params: TaskSendParams = request.params
+        if not task_send_params.message.parts:
+            return JSONRPCResponse(
+                id=request.id,
+                error=InvalidParamsError(message="Message parts cannot be empty")
+            )
         if not utils.are_modalities_compatible(
-            task_send_params.acceptedOutputModes, CurrencyAgent.SUPPORTED_CONTENT_TYPES
+            task_send_params.acceptedOutputModes, NewsTweetAgent.SUPPORTED_CONTENT_TYPES
         ):
             logger.warning(
                 "Unsupported output mode. Received %s, Support %s",
                 task_send_params.acceptedOutputModes,
-                CurrencyAgent.SUPPORTED_CONTENT_TYPES,
+                NewsTweetAgent.SUPPORTED_CONTENT_TYPES,
             )
             return utils.new_incompatible_types_error(request.id)
-        
+
         if task_send_params.pushNotification and not task_send_params.pushNotification.url:
             logger.warning("Push notification URL is missing")
-            return JSONRPCResponse(id=request.id, error=InvalidParamsError(message="Push notification URL is missing"))
-        
+            return JSONRPCResponse(
+                id=request.id, error=InvalidParamsError(message="Push notification URL is missing")
+            )
+
         return None
-        
+
     async def on_send_task(self, request: SendTaskRequest) -> SendTaskResponse:
         """Handles the 'send task' request."""
         validation_error = self._validate_request(request)
         if validation_error:
             return SendTaskResponse(id=request.id, error=validation_error.error)
-        
+
         if request.params.pushNotification:
             if not await self.set_push_notification_info(request.params.id, request.params.pushNotification):
-                return SendTaskResponse(id=request.id, error=InvalidParamsError(message="Push notification URL is invalid"))
+                return SendTaskResponse(
+                    id=request.id, error=InvalidParamsError(message="Push notification URL is invalid")
+                )
 
         await self.upsert_task(request.params)
         task = await self.update_store(
@@ -139,10 +156,11 @@ class AgentTaskManager(InMemoryTaskManager):
             agent_response = self.agent.invoke(query, task_send_params.sessionId)
         except Exception as e:
             logger.error(f"Error invoking agent: {e}")
-            raise ValueError(f"Error invoking agent: {e}")
-        return await self._process_agent_response(
-            request, agent_response
-        )
+            return SendTaskResponse(
+                id=request.id,
+                error=InternalError(message=f"Error invoking agent: {str(e)}")
+            )
+        return await self._process_agent_response(request, agent_response)
 
     async def on_send_task_subscribe(
         self, request: SendTaskStreamingRequest
@@ -156,34 +174,52 @@ class AgentTaskManager(InMemoryTaskManager):
 
             if request.params.pushNotification:
                 if not await self.set_push_notification_info(request.params.id, request.params.pushNotification):
-                    return JSONRPCResponse(id=request.id, error=InvalidParamsError(message="Push notification URL is invalid"))
+                    return JSONRPCResponse(
+                        id=request.id, error=InvalidParamsError(message="Push notification URL is invalid")
+                    )
 
             task_send_params: TaskSendParams = request.params
-            sse_event_queue = await self.setup_sse_consumer(task_send_params.id, False)            
+            sse_event_queue = await self.setup_sse_consumer(task_send_params.id, False)
 
             asyncio.create_task(self._run_streaming_agent(request))
 
             return self.dequeue_events_for_sse(
                 request.id, task_send_params.id, sse_event_queue
             )
-        except Exception as e:
-            logger.error(f"Error in SSE stream: {e}")
-            print(traceback.format_exc())
+        except ValueError as e:
+            logger.error(f"Invalid request parameters: {e}")
             return JSONRPCResponse(
                 id=request.id,
-                error=InternalError(
-                    message="An error occurred while streaming the response"
-                ),
+                error=InvalidParamsError(message=str(e))
+            )
+        except Exception as e:
+            logger.error(f"Error in SSE stream: {e}")
+            return JSONRPCResponse(
+                id=request.id,
+                error=InternalError(message=f"Unexpected error: {str(e)}")
             )
 
     async def _process_agent_response(
         self, request: SendTaskRequest, agent_response: dict
     ) -> SendTaskResponse:
-        """Processes the agent's response and updates the task store."""
+        """Processes the agent's response and updates the task store.
+
+        Args:
+            request: The task request containing params (id, historyLength, etc.).
+            agent_response: Dictionary with 'content' and 'require_user_input' from agent.
+
+        Returns:
+            SendTaskResponse: Task result with updated status and history.
+        """
         task_send_params: TaskSendParams = request.params
         task_id = task_send_params.id
         history_length = task_send_params.historyLength
-        task_status = None
+
+        if not isinstance(agent_response, dict) or "content" not in agent_response or "require_user_input" not in agent_response:
+            return SendTaskResponse(
+                id=request.id,
+                error=InternalError(message="Invalid agent response format")
+            )
 
         parts = [{"type": "text", "text": agent_response["content"]}]
         artifact = None
@@ -201,46 +237,57 @@ class AgentTaskManager(InMemoryTaskManager):
         task_result = self.append_task_history(task, history_length)
         await self.send_task_notification(task)
         return SendTaskResponse(id=request.id, result=task_result)
-    
+
     def _get_user_query(self, task_send_params: TaskSendParams) -> str:
+        if not task_send_params.message.parts:
+            raise ValueError("Message parts cannot be empty")
         part = task_send_params.message.parts[0]
         if not isinstance(part, TextPart):
             raise ValueError("Only text parts are supported")
         return part.text
-    
+
     async def send_task_notification(self, task: Task):
         if not await self.has_push_notification_info(task.id):
-            logger.info(f"No push notification info found for task {task.id}")
+            logger.debug(f"No push notification info found for task {task.id}")
             return
         push_info = await self.get_push_notification_info(task.id)
 
         logger.info(f"Notifying for task {task.id} => {task.status.state}")
-        await self.notification_sender_auth.send_push_notification(
-            push_info.url,
-            data=task.model_dump(exclude_none=True)
-        )
+        try:
+            await self.notification_sender_auth.send_push_notification(
+                push_info.url,
+                data=task.model_dump(exclude_none=True)
+            )
+        except Exception as e:
+            logger.error(f"Failed to send notification for task {task.id}: {e}")
 
     async def on_resubscribe_to_task(
-        self, request
+        self, request: SendTaskStreamingRequest
     ) -> AsyncIterable[SendTaskStreamingResponse] | JSONRPCResponse:
         task_id_params: TaskIdParams = request.params
         try:
             sse_event_queue = await self.setup_sse_consumer(task_id_params.id, True)
             return self.dequeue_events_for_sse(request.id, task_id_params.id, sse_event_queue)
+        except TaskNotFoundError:
+            return JSONRPCResponse(
+                id=request.id,
+                error=TaskNotFoundError(message=f"Task {task_id_params.id} not found")
+            )
         except Exception as e:
             logger.error(f"Error while reconnecting to SSE stream: {e}")
             return JSONRPCResponse(
                 id=request.id,
-                error=InternalError(
-                    message=f"An error occurred while reconnecting to stream: {e}"
-                ),
+                error=InternalError(message=f"Unexpected error: {str(e)}")
             )
-    
+
     async def set_push_notification_info(self, task_id: str, push_notification_config: PushNotificationConfig):
-        # Verify the ownership of notification URL by issuing a challenge request.
-        is_verified = await self.notification_sender_auth.verify_push_notification_url(push_notification_config.url)
-        if not is_verified:
+        try:
+            is_verified = await self.notification_sender_auth.verify_push_notification_url(push_notification_config.url)
+            if not is_verified:
+                return False
+        except Exception as e:
+            logger.error(f"Failed to verify push notification URL: {e}")
             return False
-        
+
         await super().set_push_notification_info(task_id, push_notification_config)
         return True
