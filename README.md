@@ -55,6 +55,22 @@ Run one (or more) [agent](/samples/python/agents/README.md) A2A server and one o
 
 The following example will run the langgraph agent with the python CLI host:
 
+## Prerequisites
+
+- Python 3.13 or higher
+- UV
+The following example will run the langgraph agent with the python CLI host:
+
 1. Run an agent:
     ```bash
     uv run agents/langgraph
+    ```
+2. Run the example client
+    ```
+    uv run hosts/cli
+    ```
+---
+**NOTE:** 
+This is sample code and not production-quality libraries.
+---
+
