@@ -28,6 +28,8 @@ For a detailed architecture diagram, refer to the presentation slides.
 The workflow for the news-to-Twitter pipeline is illustrated in the following diagram:
 - **workflow.png**: A flowchart depicting the data flow from user input to Agent 1 (Summarizer), Agent 2 (TweetGen), Agent 3 (Poster), and the final output (tweet ID and transaction hash).
 
+![Project Screenshot](Workflow.png)
+
 ## Use Cases
 
 MangalX supports various multi-agent use cases:
