@@ -32,7 +32,7 @@ The workflow for the news-to-Twitter pipeline is illustrated in the following di
 
 ## Use Cases
 
-MangalX supports various multi-agent use cases:
+MangalX has the capability to support various multi-agent use cases in future:
 - News-to-Twitter Pipeline
 - Asset Bridging Automation
 - Token Swapping Workflow
